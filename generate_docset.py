@@ -41,12 +41,23 @@ ENTRY_TYPES = {
     "RelNotes": "Guide",
     "UNIX_IUG": "Guide",
     "UserGuide": "Guide",
+    "GUI/Examples": "Guide",
     "anguage/Error Trapping": "Guide",
     # Sections.
     "MiscPages": "Section",
+    "GUI/Miscellaneous": "Section",
     "GUI/SummaryTables": "Section",
-    # Other.
+    # Objects.
     "GUI/Objects": "Object",
+    # These are all sub-pages of various objects.
+    "GUI/ChildLists": "Object",
+    "GUI/EventLists": "Object",
+    "GUI/MethodLists": "Object",
+    "GUI/MethodOrEventApplies": "Object",
+    "GUI/ParentLists": "Object",
+    "GUI/PropLists": "Object",
+    "GUI/PropertyApplies": "Object",
+    # Other.
     "GUI/Properties": "Property",
     "Language/Control Structures": "Statement",
     "Language/Errors": "Error",
@@ -54,6 +65,8 @@ ENTRY_TYPES = {
     "Language/System Commands": "Command",
     # This is basically only for the RIDE help.
     "Language/Symbols": "Notation",
+    # TODO: This is actually a useless page.
+    "index.html": "Guide",
 }
 
 
@@ -68,13 +81,13 @@ def download_jsonp(path: str) -> Any:
     return json5.loads(jsonp)
 
 
-def download_urls(urls: Iterable[str], *, desc: str, dest_dir: Path | str) -> None:
+def download_urls(urls: Iterable[str], *, desc: str) -> None:
     """
     Download all listed urls into the pages directory, skipping any already
     downloaded and showing progess.
     """
     for page in tqdm(list(urls), desc=desc):
-        destination = Path(dest_dir) / Path(page).relative_to("/")
+        destination = TMP_DIR / "pages" / Path(page).relative_to("/")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             continue
@@ -110,12 +123,10 @@ def scrape_ride_help() -> dict[str, str]:
     return r
 
 
-def scrape_entries() -> None:
+def scrape_help_toc() -> list[str]:
     """
-    Blindly download all html pages we need.
+    Get the pages exposed in the help.dyalog.com Table of Contents.
     """
-    TMP_DIR.mkdir(exist_ok=True)
-
     # Download Table of Contents tree.
     if not (TMP_DIR / "toc.json").exists():
         toc = download_jsonp("/Data/Tocs/Dyalog.js")
@@ -134,17 +145,9 @@ def scrape_entries() -> None:
     # Extract pages to download.
     with open(TMP_DIR / "chunks.json") as fd:
         chunks = json.load(fd)
-    chunks = json.loads((TMP_DIR / "chunks.json").read_text())
     pages = [k for x in chunks for k in x.keys()]
     pages.remove("___")  # This lists topics with no pages.
-
-    # Note RIDE F1-help pages are not exposed in the tree. We could scrape
-    # https://help.dyalog.com/18.0/index.htm#Language/Introduction/Language%20Elements.htm
-    # but it's easier to just use the RIDE list directly.
-    pages.extend(scrape_ride_help().values())
-
-    # Download every page.
-    download_urls(pages, desc="Downloading topics", dest_dir=TMP_DIR / "pages")
+    return pages
 
 
 def reconstruct_url(html_file: Path, rel_url: str) -> str:
@@ -175,20 +178,24 @@ def get_entry_type(path: Path | str, title: str) -> str:
 
 
 class DocSet:
+    assets: set[str]
     connection: sqlite3.Connection
 
     def __init__(self) -> None:
+        self.assets = set()
         self.connection = sqlite3.connect(RESOURCES_DIR / "docSet.dsidx")
         self.connection.execute("DROP TABLE IF EXISTS searchIndex;")
         self.connection.execute(
             "CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);"
         )
         self.connection.execute(
-            "CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);"
+            "CREATE UNIQUE INDEX anchor ON searchIndex(name, type, path);"
         )
 
     def add_index(self, title: str, path: Path | str):
-        path = Path(path).with_suffix(".html")  # Make sure it's all .html.
+        # Make sure the path is html, absolute (to Documents/), and exists.
+        path = Path("/", path).with_suffix(".html")
+        assert (DOCUMENTS_DIR / path.relative_to("/")).exists()
         self.connection.execute(
             "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
             (title, get_entry_type(path, title), str(path)),
@@ -197,6 +204,37 @@ class DocSet:
     def close(self) -> None:
         self.connection.commit()
         self.connection.close()
+
+    def process_pages(self, pages: Iterable[str], *, index=True) -> list[Path]:
+        links = set()
+        # Add all the other downloaded .htm entries.
+        for page in tqdm(list(pages), desc="Processing html"):
+            path = TMP_DIR / "pages" / Path(page).relative_to("/")
+            with open(path, "r") as fd:
+                soup = BeautifulSoup(fd, "html.parser")
+            for link in soup("a", href=has_relative_href):
+                # TODO: This and reconstruct_url probably can be cleaner
+                link_dest = reconstruct_url(path, link["href"]).split("#")[0]
+                link_path = TMP_DIR / "pages" / Path(link_dest).relative_to("/")
+                if not link_path.exists():
+                    links.add(str(link_dest))
+            # Extract other assets.
+            for link in soup("link", rel="stylesheet"):
+                self.assets.add(reconstruct_url(path, link["href"]))
+            for img in soup("img"):
+                self.assets.add(reconstruct_url(path, img["src"]))
+
+            # Sanitize and save our changes. Use .html instead of .htm because
+            # otherwise Dash will not recognise title tags correctly.
+            sanitize_html(soup)
+            destination = DOCUMENTS_DIR / path.relative_to(TMP_DIR / "pages")
+            destination.parent.mkdir(exist_ok=True, parents=True)
+            destination.with_suffix(".html").write_text(str(soup))
+            if index:
+                self.add_index(
+                    soup.title.string, destination.relative_to(DOCUMENTS_DIR)
+                )
+        return links
 
 
 def sanitize_html(soup: BeautifulSoup) -> None:
@@ -213,11 +251,9 @@ def sanitize_html(soup: BeautifulSoup) -> None:
     for script in soup("script"):
         script.extract()
 
-    # Path all the links to point to new .html pages (instead of .htm).
-    for link in soup("a"):
-        if link.has_attr("href"):
-            # TODO: Only for local links.
-            link["href"] = link["href"].replace(".htm", ".html")
+    # Patch all relative links to point to new .html pages (instead of .htm).
+    for link in soup("a", href=has_relative_href):
+        link["href"] = link["href"].replace(".htm", ".html")
 
     # Add Dash anchors.
     for section in soup("h4"):
@@ -229,54 +265,19 @@ def sanitize_html(soup: BeautifulSoup) -> None:
             section.insert_before(BeautifulSoup(anchor, "html.parser"))
 
 
-def generate_docset() -> None:
+def has_relative_href(href: str) -> bool:
+    return (
+        href
+        and not urllib.parse.urlparse(href).netloc
+        and not href.startswith("javascript:")
+    )
+
+
+def main() -> None:
     """
     Sanitize the downloaded html pages, copy them into the docset, and download
     any remaining assets.
     """
-    # Setup.
-    DOCUMENTS_DIR.mkdir(exist_ok=True, parents=True)
-    shutil.copyfile("res/Info.plist", DOCSET_DIR / "Contents" / "Info.plist")
-    shutil.copyfile("res/icon.png", DOCSET_DIR / "icon.png")
-
-    docset = DocSet()
-    assets = set()
-
-    # Add the RIDE help. This makes it possible to use APL symbols etc in Dash.
-    ride_help = scrape_ride_help()
-    for title, path in ride_help.items():
-        docset.add_index(title, path)
-
-    # Add all the other downloaded .htm entries.
-    for path in tqdm(list(TMP_DIR.rglob("*.htm")), desc="Sanitizing html"):
-        with open(path, "r") as fd:
-            soup = BeautifulSoup(fd, "html.parser")
-        sanitize_html(soup)
-        for link in soup("link"):
-            assert link["rel"][0] == "stylesheet"
-            assets.add(reconstruct_url(path, link["href"]))
-        for img in soup("img"):
-            assets.add(reconstruct_url(path, img["src"]))
-
-        # Save our changes. Use .html instead of .htm because otherwise Dash
-        # will not recognise title tags correctly.
-        destination = DOCUMENTS_DIR / path.relative_to(TMP_DIR / "pages")
-        destination.parent.mkdir(exist_ok=True, parents=True)
-        destination.with_suffix(".html").write_text(str(soup))
-        docset.add_index(soup.title.string, destination.relative_to(DOCUMENTS_DIR))
-
-    # Download to the tmp dir then copy it over. Let's us reconstruct the docset
-    # easily.
-    download_urls(assets, desc="Downloading assets", dest_dir=TMP_DIR / "pages")
-    for path in assets:
-        rel_path = Path(path).relative_to("/")
-        (DOCUMENTS_DIR / rel_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copyfile(TMP_DIR / "pages" / rel_path, DOCUMENTS_DIR / rel_path)
-
-    docset.close()
-
-
-def main() -> None:
     if TMP_DIR.exists():
         print(
             "Note the tmp/ directory already exists. "
@@ -284,8 +285,43 @@ def main() -> None:
             "Remove it if a clean docset is required.",
             file=sys.stderr,
         )
-    scrape_entries()
-    generate_docset()
+    # Setup.
+    DOCUMENTS_DIR.mkdir(exist_ok=True, parents=True)
+    TMP_DIR.mkdir(exist_ok=True)
+    shutil.copyfile("res/Info.plist", DOCSET_DIR / "Contents" / "Info.plist")
+    shutil.copyfile("res/icon.png", DOCSET_DIR / "icon.png")
+
+    docset = DocSet()
+    missing_pages = set()
+
+    # Add Table of Contents pages.
+    toc_pages = scrape_help_toc()
+    download_urls(toc_pages, desc="Downloading ToC pages")
+    missing_pages |= docset.process_pages(toc_pages)
+
+    # Add the RIDE help. This makes it possible to use APL symbols etc in Dash.
+    # We could scrape [1] but it's easier to just use the RIDE list directly.
+    # [1]: https://help.dyalog.com/18.0/index.htm#Language/Introduction/Language%20Elements.htm
+    ride_help = scrape_ride_help()
+    download_urls(ride_help.values(), desc="Downloading RIDE pages")
+    missing_pages |= docset.process_pages(ride_help.values())
+    for title, path in ride_help.items():
+        docset.add_index(title, path)
+
+    # Download and process missing pages and assert we really got them all.
+    download_urls(missing_pages, desc="Downloading missing pages")
+    assert not docset.process_pages(missing_pages, index=False)
+
+    # Download missing assets to the tmp dir then copy them over. Let's us
+    # reconstruct the docset easily.
+    download_urls(docset.assets, desc="Downloading assets")
+    for path in docset.assets:
+        rel_path = Path(path).relative_to("/")
+        (DOCUMENTS_DIR / rel_path).parent.mkdir(exist_ok=True, parents=True)
+        shutil.copyfile(TMP_DIR / "pages" / rel_path, DOCUMENTS_DIR / rel_path)
+
+    # Important, closes commits the index database.
+    docset.close()
 
 
 if __name__ == "__main__":
