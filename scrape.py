@@ -174,10 +174,15 @@ def copy_sanitize_entries() -> None:
         for script in soup("script"):
             script.extract()
 
+        # Path all the links to point to new .html pages (instead of .htm).
+        for link in soup("a"):
+            if link.has_attr("href"):
+                link["href"] = link["href"].replace(".htm", ".html")
+
         # Add Dash anchors.
         for section in soup("h4"):
             if section.string:
-                # Lots of heading end with a colon like "Examples:"
+                # Lots of heading end with a colon like "Examples:", looks bad.
                 name = urllib.parse.quote(str(section.string).removesuffix(":"))
                 anchor = (
                     f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
@@ -193,10 +198,11 @@ def copy_sanitize_entries() -> None:
         for img in soup("img"):
             images.add(reconstruct_url(html, img["src"]))
 
-        # Save our changes.
+        # Save our changes. Use .html instead of .htm because otherwise Dash
+        # will not recognise title tags correctly.
         destination = DOCUMENTS_DIR / html.relative_to(TMP_DIR / "pages")
         destination.parent.mkdir(exist_ok=True, parents=True)
-        destination.write_text(str(soup))
+        destination.with_suffix(".html").write_text(str(soup))
 
     # Download to the data dir then just copy it over. Let's use delete the docset.
     download_urls(
@@ -235,13 +241,15 @@ def generate_docset_index() -> None:
     # Add the RIDE help. This makes it possible to use APL symbols etc in Dash.
     ride_help = scrape_ride_help()
     for title, path in ride_help.items():
+        # Note all the .htm files are not .html. Account for that.
+        path = path.replace(".htm", ".html")
         cur.execute(
             "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
             (title, "Notation", path),
         )
 
     # Add every entry into the search index.
-    for path in tqdm(list(DOCUMENTS_DIR.rglob("*.htm")), desc="Creating the index"):
+    for path in tqdm(list(DOCUMENTS_DIR.rglob("*.html")), desc="Creating the index"):
         # I could do this in copy_sanitize_entries but this way the SQL stuff
         # stays separate.
         title = re.search(r"<title>([^<]*)</title>", path.read_text())[1]
@@ -263,6 +271,7 @@ if __name__ == "__main__":
             "Remove it if a clean docset is required."
         )
     DOCUMENTS_DIR.mkdir(exist_ok=True, parents=True)
+    TMP_DIR.mkdir(exist_ok=True)
     # This is split into phases to limit spamming the help.dyalog.com servers.
     scrape_entries()
     copy_sanitize_entries()
