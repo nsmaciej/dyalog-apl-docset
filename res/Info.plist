@@ -11,7 +11,7 @@
 	<key>isDashDocset</key>
 	<true/>
     <key>dashIndexFilePath</key>
-    <string>Content/MiscPages/HelpWelcome.htm</string>
+    <string>Content/MiscPages/HelpWelcome.html</string>
     <key>DashDocSetFallbackURL</key>
     <string>https://help.dyalog.com/latest/#</string>
     <key>DashDocSetPlayURL</key>
