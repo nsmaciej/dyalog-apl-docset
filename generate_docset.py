@@ -1,20 +1,25 @@
 from bs4 import BeautifulSoup
-from pathlib import Path
 from tqdm import trange, tqdm
-from typing import Any, Iterable
-import json
 import json5
+
+from typing import Any, Iterable
+from pathlib import Path
+import json
 import re
 import requests
 import shutil
 import sqlite3
 import subprocess
+import sys
 import urllib.parse
 
 
+# Make sure to keep these updated for new versions of Dyalog. Both of these are
+# used to patch and run the hlp.js to get better symbol help.
 CURRENT_VERSION = "18.0"
+HLP_JS_URL = "https://raw.githubusercontent.com/Dyalog/ride/2882e1441c39657a84ab4e6ba3aa932b0b719f33/src/hlp.js"
+
 BASE_URL = "https://help.dyalog.com/latest"
-HLP_JS_URL = "https://raw.githubusercontent.com/Dyalog/ride/master/src/hlp.js"
 DOCSET_DIR = Path("Dyalog APL.docset")
 RESOURCES_DIR = DOCSET_DIR / "Contents" / "Resources"
 DOCUMENTS_DIR = RESOURCES_DIR / "Documents"
@@ -46,8 +51,9 @@ ENTRY_TYPES = {
     "Language/Control Structures": "Statement",
     "Language/Errors": "Error",
     "Language/Primitive Operators": "Operator",
-    "Language/Symbols": "Notation",  # This is basically the RIDE help stuff.
     "Language/System Commands": "Command",
+    # This is basically only for the RIDE help.
+    "Language/Symbols": "Notation",
 }
 
 
@@ -108,6 +114,8 @@ def scrape_entries() -> None:
     """
     Blindly download all html pages we need.
     """
+    TMP_DIR.mkdir(exist_ok=True)
+
     # Download Table of Contents tree.
     if not (TMP_DIR / "toc.json").exists():
         toc = download_jsonp("/Data/Tocs/Dyalog.js")
@@ -144,74 +152,13 @@ def reconstruct_url(html_file: Path, rel_url: str) -> str:
     Given a html file from the pages directory and a relative URL, figure out
     the absolute URL.
     """
-    # We get the .parent to get the url directory, to remove .. from this we
-    # resolve it. To use relative_to we need to resolve the pages directory too.
+    # We get the .parent to get the url directory. We resolve it to to remove '..'.
+    # We also need to resolve pages/ to make relalive_to work.
     return "/" + str(
         (html_file.parent / rel_url)
         .resolve()
         .relative_to((TMP_DIR / "pages/").resolve())
     )
-
-
-def copy_sanitize_entries() -> None:
-    """
-    Sanitize the downloaded html pages, copy them into the docset, and download
-    any remaining assets.
-    """
-    images = set()
-    stylesheets = set()
-    for html in tqdm(list(TMP_DIR.rglob("*.htm")), desc="Sanitizing html"):
-        with open(html, "r") as fd:
-            soup = BeautifulSoup(fd, "html.parser")
-
-        # Remove the "Open topic with navigation" link and breadcrumbs.
-        for cls in ["MCWebHelpFramesetLinkTop", "breadcrumbs"]:
-            for el in soup(class_=cls):
-                el.extract()
-
-        # Remove all script tags.
-        del soup.body["onload"]
-        for script in soup("script"):
-            script.extract()
-
-        # Path all the links to point to new .html pages (instead of .htm).
-        for link in soup("a"):
-            if link.has_attr("href"):
-                link["href"] = link["href"].replace(".htm", ".html")
-
-        # Add Dash anchors.
-        for section in soup("h4"):
-            if section.string:
-                # Lots of heading end with a colon like "Examples:", looks bad.
-                name = urllib.parse.quote(str(section.string).removesuffix(":"))
-                anchor = (
-                    f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
-                )
-                section.insert_before(BeautifulSoup(anchor, "html.parser"))
-
-        # Extract stylesheets.
-        for link in soup("link"):
-            assert link["rel"][0] == "stylesheet"
-            stylesheets.add(reconstruct_url(html, link["href"]))
-
-        # Extract images.
-        for img in soup("img"):
-            images.add(reconstruct_url(html, img["src"]))
-
-        # Save our changes. Use .html instead of .htm because otherwise Dash
-        # will not recognise title tags correctly.
-        destination = DOCUMENTS_DIR / html.relative_to(TMP_DIR / "pages")
-        destination.parent.mkdir(exist_ok=True, parents=True)
-        destination.with_suffix(".html").write_text(str(soup))
-
-    # Download to the data dir then just copy it over. Let's use delete the docset.
-    download_urls(
-        images | stylesheets, desc="Downloading assets", dest_dir=TMP_DIR / "pages"
-    )
-    for path in images | stylesheets:
-        rel_path = Path(path).relative_to("/")
-        (DOCUMENTS_DIR / rel_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copyfile(TMP_DIR / "pages" / rel_path, DOCUMENTS_DIR / rel_path)
 
 
 def get_entry_type(path: Path | str, title: str) -> str:
@@ -223,58 +170,123 @@ def get_entry_type(path: Path | str, title: str) -> str:
         return "Event" if " Event" in title else "Method"
     if "UserGuide/Installation and Configuration/Configuration Parameters" in path:
         return "Setting"
+    # Crashes if no entry type is found.
     return next(v for k, v in ENTRY_TYPES.items() if k in path)
 
 
-def generate_docset_index() -> None:
+class DocSet:
+    connection: sqlite3.Connection
+
+    def __init__(self) -> None:
+        self.connection = sqlite3.connect(RESOURCES_DIR / "docSet.dsidx")
+        self.connection.execute("DROP TABLE IF EXISTS searchIndex;")
+        self.connection.execute(
+            "CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);"
+        )
+        self.connection.execute(
+            "CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);"
+        )
+
+    def add_index(self, title: str, path: Path | str):
+        path = Path(path).with_suffix(".html")  # Make sure it's all .html.
+        self.connection.execute(
+            "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
+            (title, get_entry_type(path, title), str(path)),
+        )
+
+    def close(self) -> None:
+        self.connection.commit()
+        self.connection.close()
+
+
+def sanitize_html(soup: BeautifulSoup) -> None:
     """
-    Generate the docset index database.
+    Process the html to make it ready for Dash.
     """
-    conn = sqlite3.connect(RESOURCES_DIR / "docSet.dsidx")
-    cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS searchIndex;")
-    cur.execute(
-        "CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);"
-    )
-    cur.execute("CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);")
+    # Remove the "Open topic with navigation" link and breadcrumbs.
+    for cls in ["MCWebHelpFramesetLinkTop", "breadcrumbs"]:
+        for el in soup(class_=cls):
+            el.extract()
+
+    # Remove all script tags.
+    del soup.body["onload"]
+    for script in soup("script"):
+        script.extract()
+
+    # Path all the links to point to new .html pages (instead of .htm).
+    for link in soup("a"):
+        if link.has_attr("href"):
+            # TODO: Only for local links.
+            link["href"] = link["href"].replace(".htm", ".html")
+
+    # Add Dash anchors.
+    for section in soup("h4"):
+        if section.string:
+            # Lots of heading end with a colon like "Examples:", looks bad.
+            # We use safe="" to make sure a slash can't appear in the name.
+            name = urllib.parse.quote(str(section.string).removesuffix(":"), safe="")
+            anchor = f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
+            section.insert_before(BeautifulSoup(anchor, "html.parser"))
+
+
+def generate_docset() -> None:
+    """
+    Sanitize the downloaded html pages, copy them into the docset, and download
+    any remaining assets.
+    """
+    # Setup.
+    DOCUMENTS_DIR.mkdir(exist_ok=True, parents=True)
+    shutil.copyfile("res/Info.plist", DOCSET_DIR / "Contents" / "Info.plist")
+    shutil.copyfile("res/icon.png", DOCSET_DIR / "icon.png")
+
+    docset = DocSet()
+    assets = set()
 
     # Add the RIDE help. This makes it possible to use APL symbols etc in Dash.
     ride_help = scrape_ride_help()
     for title, path in ride_help.items():
-        # Note all the .htm files are not .html. Account for that.
-        path = path.replace(".htm", ".html")
-        cur.execute(
-            "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
-            (title, "Notation", path),
-        )
+        docset.add_index(title, path)
 
-    # Add every entry into the search index.
-    for path in tqdm(list(DOCUMENTS_DIR.rglob("*.html")), desc="Creating the index"):
-        # I could do this in copy_sanitize_entries but this way the SQL stuff
-        # stays separate.
-        title = re.search(r"<title>([^<]*)</title>", path.read_text())[1]
-        cur.execute(
-            "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
-            (title, get_entry_type(path, title), str(path.relative_to(DOCUMENTS_DIR))),
-        )
+    # Add all the other downloaded .htm entries.
+    for path in tqdm(list(TMP_DIR.rglob("*.htm")), desc="Sanitizing html"):
+        with open(path, "r") as fd:
+            soup = BeautifulSoup(fd, "html.parser")
+        sanitize_html(soup)
+        for link in soup("link"):
+            assert link["rel"][0] == "stylesheet"
+            assets.add(reconstruct_url(path, link["href"]))
+        for img in soup("img"):
+            assets.add(reconstruct_url(path, img["src"]))
 
-    # Important.
-    conn.commit()
-    conn.close()
+        # Save our changes. Use .html instead of .htm because otherwise Dash
+        # will not recognise title tags correctly.
+        destination = DOCUMENTS_DIR / path.relative_to(TMP_DIR / "pages")
+        destination.parent.mkdir(exist_ok=True, parents=True)
+        destination.with_suffix(".html").write_text(str(soup))
+        docset.add_index(soup.title.string, destination.relative_to(DOCUMENTS_DIR))
+
+    # Download to the tmp dir then copy it over. Let's us reconstruct the docset
+    # easily.
+    download_urls(assets, desc="Downloading assets", dest_dir=TMP_DIR / "pages")
+    for path in assets:
+        rel_path = Path(path).relative_to("/")
+        (DOCUMENTS_DIR / rel_path).parent.mkdir(exist_ok=True, parents=True)
+        shutil.copyfile(TMP_DIR / "pages" / rel_path, DOCUMENTS_DIR / rel_path)
+
+    docset.close()
 
 
-if __name__ == "__main__":
+def main() -> None:
     if TMP_DIR.exists():
         print(
             "Note the tmp/ directory already exists. "
             "The docset might contain stale entries. "
-            "Remove it if a clean docset is required."
+            "Remove it if a clean docset is required.",
+            file=sys.stderr,
         )
-    DOCUMENTS_DIR.mkdir(exist_ok=True, parents=True)
-    TMP_DIR.mkdir(exist_ok=True)
-    # This is split into phases to limit spamming the help.dyalog.com servers.
     scrape_entries()
-    copy_sanitize_entries()
-    generate_docset_index()
-    shutil.copyfile("res/Info.plist", DOCSET_DIR / "Contents" / "Info.plist")
-    shutil.copyfile("res/icon.png", DOCSET_DIR / "icon.png")
+    generate_docset()
+
+
+if __name__ == "__main__":
+    main()
