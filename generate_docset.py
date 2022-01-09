@@ -87,7 +87,7 @@ def download_urls(urls: Iterable[str], *, desc: str) -> None:
     downloaded and showing progess.
     """
     for page in tqdm(list(urls), desc=desc):
-        destination = TMP_DIR / "pages" / Path(page).relative_to("/")
+        destination = TMP_DIR / Path(page).relative_to("/")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             continue
@@ -156,11 +156,11 @@ def reconstruct_url(html_file: Path, rel_url: str) -> str:
     the absolute URL.
     """
     # We get the .parent to get the url directory. We resolve it to to remove '..'.
-    # We also need to resolve pages/ to make relalive_to work.
+    # We also need to resolve tmp to make relalive_to work.
     return "/" + str(
         (html_file.parent / rel_url)
         .resolve()
-        .relative_to((TMP_DIR / "pages/").resolve())
+        .relative_to(TMP_DIR.resolve())
     )
 
 
@@ -209,13 +209,13 @@ class DocSet:
         links = set()
         # Add all the other downloaded .htm entries.
         for page in tqdm(list(pages), desc="Processing html"):
-            path = TMP_DIR / "pages" / Path(page).relative_to("/")
+            path = TMP_DIR / Path(page).relative_to("/")
             with open(path, "r") as fd:
                 soup = BeautifulSoup(fd, "html.parser")
             for link in soup("a", href=has_relative_href):
                 # TODO: This and reconstruct_url probably can be cleaner
                 link_dest = reconstruct_url(path, link["href"]).split("#")[0]
-                link_path = TMP_DIR / "pages" / Path(link_dest).relative_to("/")
+                link_path = TMP_DIR / Path(link_dest).relative_to("/")
                 if not link_path.exists():
                     links.add(str(link_dest))
             # Extract other assets.
@@ -227,7 +227,7 @@ class DocSet:
             # Sanitize and save our changes. Use .html instead of .htm because
             # otherwise Dash will not recognise title tags correctly.
             sanitize_html(soup)
-            destination = DOCUMENTS_DIR / path.relative_to(TMP_DIR / "pages")
+            destination = DOCUMENTS_DIR / path.relative_to(TMP_DIR)
             destination.parent.mkdir(exist_ok=True, parents=True)
             destination.with_suffix(".html").write_text(str(soup))
             if index:
@@ -318,7 +318,7 @@ def main() -> None:
     for path in docset.assets:
         rel_path = Path(path).relative_to("/")
         (DOCUMENTS_DIR / rel_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copyfile(TMP_DIR / "pages" / rel_path, DOCUMENTS_DIR / rel_path)
+        shutil.copyfile(TMP_DIR / rel_path, DOCUMENTS_DIR / rel_path)
 
     # Important, closes commits the index database.
     docset.close()
