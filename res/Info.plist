@@ -12,8 +12,6 @@
 	<true/>
     <key>dashIndexFilePath</key>
     <string>Content/MiscPages/HelpWelcome.html</string>
-    <key>DashDocSetFallbackURL</key>
-    <string>https://help.dyalog.com/latest/#</string>
     <key>DashDocSetPlayURL</key>
     <string>https://tryapl.org/</string>
     <key>DashDocSetFamily</key>

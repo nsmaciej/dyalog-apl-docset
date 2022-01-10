@@ -1,4 +1,6 @@
+#!/usr/bin/env python3
 from bs4 import BeautifulSoup
+from bs4.element import Comment
 from tqdm import trange, tqdm
 import json5
 
@@ -89,6 +91,7 @@ def download_document(path: str) -> Path:
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         url = f"{BASE_URL}{path}"
         r = requests.get(url)
+        r.raise_for_status()
         with open(tmp_path, "wb") as fd:
             for chunk in r.iter_content(chunk_size=128):
                 fd.write(chunk)
@@ -153,7 +156,7 @@ def get_entry_type(path: str, title: str) -> str:
     """
     Get the Dash entry type given a path, handling a few special cases.
     """
-    if "Content/GUI/MethodOrEvents" in path:
+    if "GUI/MethodOrEvents" in path:
         return "Event" if " Event" in title else "Method"
     if "UserGuide/Installation and Configuration/Configuration Parameters" in path:
         return "Setting"
@@ -205,10 +208,14 @@ class DownloadQueues:
 
 
 def resolve_url(page: str, href: str) -> str:
-    return urllib.parse.urldefrag(urllib.parse.urljoin(page, href))[0]
+    base, frag = urllib.parse.urldefrag(href)
+    if "../index.htm" in base:
+        return "/Content/" + frag  # _top redirct.
+    else:
+        return urllib.parse.urljoin(page, base)
 
 
-def download_and_process_page(page: str, queues: DownloadQueues) -> str:
+def download_and_process_page(page: str, queues: DownloadQueues) -> None:
     """
     Download a page, extract all the data we need, sanitize it and write it to
     the docset folder. Returns the page title.
@@ -230,6 +237,10 @@ def download_and_process_page(page: str, queues: DownloadQueues) -> str:
     queues.assets.update(resolve_url(page, x["src"]) for x in soup("img"))
 
     sanitize_html(soup)
+    # Support Online Redirection.
+    param = page.removeprefix("/Content/")
+    comment = f"Online page at https://help.dyalog.com/latest/#{param}"
+    soup.html.insert(0, Comment(comment))
     docset_path.write_text(str(soup))
     return soup.title.string
 
@@ -242,8 +253,11 @@ def crawl_pages(queues: DownloadQueues) -> Iterator[tuple[str, str]]:
     progess = tqdm(total=len(queues.pages), desc="Pages")
     while queues.pages:
         page = queues.pages.pop()
-        title = download_and_process_page(page, queues)
-        yield title, page
+        try:
+            title = download_and_process_page(page, queues)
+            yield title, page
+        except requests.HTTPError as e:
+            progess.write(f"Download failed: {e}")
         done_pages.add(page)
         queues.pages -= done_pages
         progess.total = len(queues.pages) + len(done_pages)
@@ -251,7 +265,7 @@ def crawl_pages(queues: DownloadQueues) -> Iterator[tuple[str, str]]:
     progess.close()
 
 
-def create_docset_index(*title_path_iterables: Iterator[tuple[str, str]]):
+def create_docset_index(*title_path_iterables: Iterable[tuple[str, str]]):
     """
     Creates a new docset index from given iterables.
     """
