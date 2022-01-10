@@ -1,5 +1,7 @@
 #  Dyalog APL Dash Docset Generator
 
+> o alasa e kili sona kepeken tenpo lili a
+
 A [Dash](https://kapeli.com/dash) docset generator for
 [Dyalog APL](https://www.dyalog.com).
 Automatically scrapes [help.dyalog.com](https://help.dyalog.com/) and
