@@ -185,8 +185,8 @@ def sanitize_html(soup: BeautifulSoup) -> None:
     # Add Dash anchors.
     for section in soup("h4"):
         if section.string:
-            # Lots of heading end with a colon like "Examples:", looks bad.
-            # We use safe="" to make sure a slash can't appear in the name.
+            # Section heading ending with a colon like "Examples:" looks bad.
+            # Use safe="" to make sure a slash can't appear in the name.
             name = urllib.parse.quote(str(section.string).removesuffix(":"), safe="")
             anchor = f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
             section.insert_before(BeautifulSoup(anchor, "html.parser"))
