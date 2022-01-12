@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-from bs4 import BeautifulSoup
-from bs4.element import Comment
-from tqdm import trange, tqdm
-import json5
-
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Iterable, Iterator
+import itertools
 import json
 import re
 import requests
@@ -15,7 +8,14 @@ import sqlite3
 import subprocess
 import sys
 import urllib.parse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Iterator
 
+import json5
+from bs4 import BeautifulSoup
+from bs4.element import Comment
+from tqdm import trange, tqdm
 
 # Make sure to keep these updated for new versions of Dyalog. Both of these are
 # used to patch and run the hlp.js to get better symbol help.
@@ -45,7 +45,7 @@ ENTRY_TYPES = {
     "UNIX_IUG": "Guide",
     "UserGuide": "Guide",
     "GUI/Examples": "Guide",
-    "anguage/Error Trapping": "Guide",
+    "Language/Error Trapping": "Guide",
     # Sections.
     "MiscPages": "Section",
     "GUI/Miscellaneous": "Section",
@@ -164,35 +164,7 @@ def get_entry_type(path: str, title: str) -> str:
     return next(v for k, v in ENTRY_TYPES.items() if k in path)
 
 
-def sanitize_html(soup: BeautifulSoup) -> None:
-    """
-    Process the html to make it ready for Dash.
-    """
-    # Remove the "Open topic with navigation" link and breadcrumbs.
-    for cls in ["MCWebHelpFramesetLinkTop", "breadcrumbs"]:
-        for el in soup(class_=cls):
-            el.extract()
-
-    # Remove all script tags.
-    del soup.body["onload"]
-    for script in soup("script"):
-        script.extract()
-
-    # Patch all relative links to point to new .html pages (instead of .htm).
-    for link in soup("a", href=has_relative_href):
-        link["href"] = link["href"].replace(".htm", ".html")
-
-    # Add Dash anchors.
-    for section in soup("h4"):
-        if section.string:
-            # Section heading ending with a colon like "Examples:" looks bad.
-            # Use safe="" to make sure a slash can't appear in the name.
-            name = urllib.parse.quote(str(section.string).removesuffix(":"), safe="")
-            anchor = f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
-            section.insert_before(BeautifulSoup(anchor, "html.parser"))
-
-
-def has_relative_href(href: str) -> bool:
+def is_relative_href(href: str) -> bool:
     return (
         href
         and not urllib.parse.urlparse(href).netloc
@@ -201,9 +173,38 @@ def has_relative_href(href: str) -> bool:
     )
 
 
+def sanitize_html(soup: BeautifulSoup) -> None:
+    """
+    Process the html to make it ready for Dash.
+    """
+    # Remove the "Open topic with navigation" link and breadcrumbs.
+    for el in soup(class_=["MCWebHelpFramesetLinkTop", "breadcrumbs"]):
+            el.extract()
+
+    # Remove all script tags.
+    del soup.body["onload"]
+    for script in soup("script"):
+        script.extract()
+
+    # Patch all relative links to point to new .html pages (instead of .htm).
+    for link in soup("a", href=is_relative_href):
+        link["href"] = link["href"].replace(".htm", ".html")
+
+    # Add Dash anchors (removing consecutive duplicates). Use get_text(), since
+    # string returns None if there are any elements in the heading.
+    sections = soup(lambda x: x.name == "h4" and "Example" not in x.get("class", ""))
+    if len(sections) >= 2:
+        for section in sections:
+            heading = re.sub(r" +", " ", str(section.get_text()))
+            # Use safe="" to make sure a slash can't appear in the name.
+            anchor_name = urllib.parse.quote(heading, safe="")
+            anchor = f"<a name='//apple_ref/cpp/Section/{anchor_name}' class='dashAnchor'></a>"
+            section.insert_before(BeautifulSoup(anchor, "html.parser"))
+
+
 @dataclass
 class DownloadQueues:
-    pages: set[str]
+    pages: set[str] = field(default_factory=set)
     assets: set[str] = field(default_factory=set)
 
 
@@ -229,7 +230,7 @@ def download_and_process_page(page: str, queues: DownloadQueues) -> None:
 
     # Get links and assets before we sanitize them.
     queues.pages.update(
-        resolve_url(page, x["href"]) for x in soup("a", href=has_relative_href)
+        resolve_url(page, x["href"]) for x in soup("a", href=is_relative_href)
     )
     queues.assets.update(
         resolve_url(page, x["href"]) for x in soup("link", rel="stylesheet")
@@ -257,7 +258,7 @@ def crawl_pages(queues: DownloadQueues) -> Iterator[tuple[str, str]]:
             title = download_and_process_page(page, queues)
             yield title, page
         except requests.HTTPError as e:
-            progess.write(f"Download failed: {e}")
+            progess.write(f"Download failed: {e}", file=sys.stderr)
         done_pages.add(page)
         queues.pages -= done_pages
         progess.total = len(queues.pages) + len(done_pages)
@@ -276,8 +277,7 @@ def create_docset_index(*title_path_iterables: Iterable[tuple[str, str]]):
     )
     conn.execute("CREATE UNIQUE INDEX anchor ON searchIndex(name, type, path);")
 
-    for title_path in title_path_iterables:
-        for title, path in title_path:
+    for title, path in itertools.chain(*title_path_iterables):
             path = path.removesuffix(".htm") + ".html"
             conn.execute(
                 "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
