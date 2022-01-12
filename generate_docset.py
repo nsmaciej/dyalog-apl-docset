@@ -2,20 +2,21 @@
 import itertools
 import json
 import re
-import requests
 import shutil
 import sqlite3
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 import json5
+import requests
 from bs4 import BeautifulSoup
 from bs4.element import Comment
-from tqdm import trange, tqdm
+from tqdm import tqdm, trange
 
 # Make sure to keep these updated for new versions of Dyalog. Both of these are
 # used to patch and run the hlp.js to get better symbol help.
@@ -125,31 +126,32 @@ def scrape_ride_help() -> dict[str, str]:
     return r
 
 
+def get_json_or_create(path: str, create: Callable[[], Any]) -> Any:
+    """
+    Cache the result of the create call as a json file in the tmp directory.
+    """
+    try:
+        return json.loads((TMP_DIR / path).read_text())
+    except FileNotFoundError:
+        data = create()
+        (TMP_DIR / path).write_text(json.dumps(data))
+        return data
+
+
 def scrape_help_toc() -> set[str]:
     """
     Get the pages exposed in the help.dyalog.com Table of Contents.
     """
-    # Download Table of Contents tree.
-    if not (TMP_DIR / "toc.json").exists():
-        toc = download_jsonp("/Data/Tocs/Dyalog.js")
-        with open(TMP_DIR / "toc.json", "w") as fd:
-            json.dump(toc, fd)
-
-    # Download Table of Contents chunks.
-    if not (TMP_DIR / "chunks.json").exists():
-        chunks = [
+    toc = get_json_or_create("toc.json", lambda: download_jsonp("/Data/Tocs/Dyalog.js"))
+    chunks = get_json_or_create(
+        "chunks.json",
+        lambda: [
             download_jsonp(f"/Data/Tocs/{toc['prefix']}{i}.js")
-            for i in trange(7, desc="Downloading chunks")
-        ]
-        with open(TMP_DIR / "chunks.json", "w") as fd:
-            json.dump(chunks, fd)
-
-    # Extract pages to download.
-    with open(TMP_DIR / "chunks.json") as fd:
-        chunks = json.load(fd)
-    pages = {k for x in chunks for k in x.keys()}
-    pages.remove("___")  # This lists topics with no pages.
-    return pages
+            for i in trange(int(toc["numchunks"]), desc="ToC Tree")
+        ],
+    )
+    # Extract pages to download (Skipping the dummy ___ page).
+    return {k for x in chunks for k in x.keys()} - {"___"}
 
 
 def get_entry_type(path: str, title: str) -> str:
@@ -179,7 +181,7 @@ def sanitize_html(soup: BeautifulSoup) -> None:
     """
     # Remove the "Open topic with navigation" link and breadcrumbs.
     for el in soup(class_=["MCWebHelpFramesetLinkTop", "breadcrumbs"]):
-            el.extract()
+        el.extract()
 
     # Remove all script tags.
     del soup.body["onload"]
@@ -278,11 +280,11 @@ def create_docset_index(*title_path_iterables: Iterable[tuple[str, str]]):
     conn.execute("CREATE UNIQUE INDEX anchor ON searchIndex(name, type, path);")
 
     for title, path in itertools.chain(*title_path_iterables):
-            path = path.removesuffix(".htm") + ".html"
-            conn.execute(
-                "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
-                (title, get_entry_type(path, title), path),
-            )
+        path = path.removesuffix(".htm") + ".html"
+        conn.execute(
+            "INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)",
+            (title, get_entry_type(path, title), path),
+        )
 
     conn.commit()
     conn.close()
