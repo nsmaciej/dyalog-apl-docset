@@ -118,12 +118,12 @@ def scrape_ride_help() -> dict[str, str]:
         path.write_text(patched)
     raw_help = json.loads(subprocess.check_output(["node", str(path)]))
     # Filter out all the stuff that doesn't lead to the docs.
-    r = {}
+    ride_help = {}
     for title, url in raw_help.items():
         if "#" not in url:
             continue
-        r[title] = "/Content/" + url.split("#")[1]
-    return r
+        ride_help[title] = "/Content/" + url.split("#")[1]
+    return ride_help
 
 
 def get_json_or_create(path: str, create: Callable[[], Any]) -> Any:
@@ -166,9 +166,9 @@ def get_entry_type(path: str, title: str) -> str:
     return next(v for k, v in ENTRY_TYPES.items() if k in path)
 
 
-def is_relative_href(href: str) -> bool:
+def is_relative_href(href: str | None) -> bool:
     return (
-        href
+        href is not None
         and not urllib.parse.urlparse(href).netloc
         and not href.startswith("javascript:")
         and not href.startswith("mailto:")
@@ -218,7 +218,7 @@ def resolve_url(page: str, href: str) -> str:
         return urllib.parse.urljoin(page, base)
 
 
-def download_and_process_page(page: str, queues: DownloadQueues) -> None:
+def download_and_process_page(page: str, queues: DownloadQueues) -> str:
     """
     Download a page, extract all the data we need, sanitize it and write it to
     the docset folder. Returns the page title.
