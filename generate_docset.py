@@ -21,7 +21,7 @@ from tqdm import tqdm, trange
 # Make sure to keep these updated for new versions of Dyalog. Both of these are
 # used to patch and run the hlp.js to get better symbol help.
 CURRENT_VERSION = "18.0"
-HLP_JS_URL = "https://raw.githubusercontent.com/Dyalog/ride/2882e1441c39657a84ab4e6ba3aa932b0b719f33/src/hlp.js"
+HLP_JS_URL = "https://raw.githubusercontent.com/Dyalog/ride/aa40802d01adf1410a9a9af14149437961e5389c/src/hlp.js"
 
 BASE_URL = "https://help.dyalog.com/latest"
 DOCSET_DIR = Path("Dyalog APL.docset")
