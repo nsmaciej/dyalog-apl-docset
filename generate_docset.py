@@ -198,8 +198,9 @@ def sanitize_html(soup: BeautifulSoup) -> None:
     if len(sections) >= 2:
         for section in sections:
             heading = re.sub(r" +", " ", str(section.get_text()))
+            # Get rid of the colon from some headings.
             # Use safe="" to make sure a slash can't appear in the name.
-            anchor_name = urllib.parse.quote(heading, safe="")
+            anchor_name = urllib.parse.quote(heading.removesuffix(":"), safe="")
             anchor = f"<a name='//apple_ref/cpp/Section/{anchor_name}' class='dashAnchor'></a>"
             section.insert_before(BeautifulSoup(anchor, "html.parser"))
 
