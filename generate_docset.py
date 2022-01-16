@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from curses import get_tabsize
 import itertools
 import json
 import re
@@ -15,7 +16,7 @@ from typing import Any
 import json5
 import requests
 from bs4 import BeautifulSoup
-from bs4.element import Comment
+from bs4.element import Comment, Tag
 from tqdm import tqdm, trange
 
 # Make sure to keep these updated for new versions of Dyalog. Both of these are
@@ -175,6 +176,17 @@ def is_relative_href(href: str | None) -> bool:
     )
 
 
+def is_section_heading(element: Tag) -> bool:
+    if element.name in ["h4", "h5"]:  # h3 is the top heading.
+        unwanted_headings = ["example", "examples"]
+        return clean_heading_name(element.get_text()).lower() not in unwanted_headings
+    return element.name == "p" and "TableCaption" in element.get("class", [])
+
+
+def clean_heading_name(heading: str) -> str:
+    return re.sub(r"\s+", " ", heading.strip()).removesuffix(":")
+
+
 def sanitize_html(soup: BeautifulSoup) -> None:
     """
     Process the html to make it ready for Dash.
@@ -192,16 +204,21 @@ def sanitize_html(soup: BeautifulSoup) -> None:
     for link in soup("a", href=is_relative_href):
         link["href"] = link["href"].replace(".htm", ".html")
 
-    # Add Dash anchors (removing consecutive duplicates). Use get_text(), since
-    # string returns None if there are any elements in the heading.
-    sections = soup(lambda x: x.name == "h4" and "Example" not in x.get("class", ""))
+    # Add Dash anchors (removing consecutive duplicates since otherwise jumping
+    # in Dash is broken). Use get_text(), since string returns None if there are
+    # any elements in the heading.
+    sections = [
+        next(v)
+        for _, v in itertools.groupby(
+            soup(is_section_heading),
+            key=lambda x: clean_heading_name(x.get_text()),
+        )
+    ]
     if len(sections) >= 2:
         for section in sections:
-            heading = re.sub(r" +", " ", str(section.get_text()))
-            # Get rid of the colon from some headings.
             # Use safe="" to make sure a slash can't appear in the name.
-            anchor_name = urllib.parse.quote(heading.removesuffix(":"), safe="")
-            anchor = f"<a name='//apple_ref/cpp/Section/{anchor_name}' class='dashAnchor'></a>"
+            name = urllib.parse.quote(clean_heading_name(section.get_text()), safe="")
+            anchor = f"<a name='//apple_ref/cpp/Section/{name}' class='dashAnchor'></a>"
             section.insert_before(BeautifulSoup(anchor, "html.parser"))
 
 
